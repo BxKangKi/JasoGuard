@@ -248,7 +248,9 @@ private final class NFCNormalizer {
         }
         guard result != -1 else { return nil }
 
-        let fullPath = String(cString: buffer)
+        let endIndex = buffer.firstIndex(of: 0) ?? buffer.count
+        let bytes = buffer[..<endIndex].map { UInt8(bitPattern: $0) }
+        let fullPath = String(decoding: bytes, as: UTF8.self)
         guard let (parentPath, name) = splitParentAndName(fullPath), !name.isEmpty else { return nil }
         return DiskEntry(fullPath: fullPath, parentPath: parentPath, name: name)
     }
@@ -426,7 +428,7 @@ private final class NFCNormalizer {
 }
 
 #if canImport(CoreServices)
-private final class FileEventWatcher {
+private final class FileEventWatcher: @unchecked Sendable {
     private let config: Config
     private let normalizer: NFCNormalizer
     private var streams: [FSEventStreamRef] = []
@@ -502,7 +504,7 @@ private final class FileEventWatcher {
         streams.removeAll()
     }
 
-    func scanWatchPaths(maxDepth: Int, completion: (() -> Void)? = nil) {
+    func scanWatchPaths(maxDepth: Int, completion: (@Sendable () -> Void)? = nil) {
         let paths = config.expandedWatchPaths()
         queue.async {
             log("INFO", "manual/startup scan started: depth=\(maxDepth)")
@@ -660,10 +662,7 @@ private enum L {
         let stored = UserDefaults.standard.string(forKey: languagePreferenceKey) ?? AppLanguage.system.rawValue
         if stored == AppLanguage.english.rawValue { return "en" }
         if stored == AppLanguage.korean.rawValue { return "ko" }
-        if #available(macOS 13.0, *) {
-            return Locale.current.language.languageCode?.identifier == "ko" ? "ko" : "en"
-        }
-        return Locale.current.languageCode == "ko" ? "ko" : "en"
+        return Locale.current.language.languageCode?.identifier == "ko" ? "ko" : "en"
     }
 
     static func tr(_ key: String) -> String {
@@ -831,7 +830,9 @@ private enum MenuBarStatusIcon {
 #endif
 
 private let showLaunchConfirmationKey = "showLaunchConfirmation"
+private let preflightConsentAcceptedKey = "preflightConsentAccepted"
 
+@MainActor
 private final class JasoGuardAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var watcherError: String?
@@ -847,10 +848,7 @@ private final class JasoGuardAppDelegate: NSObject, NSApplicationDelegate {
         registerDefaultPreferences()
         ensureRuntimeFiles()
         createStatusItemIfNeeded()
-
-        DispatchQueue.main.async {
-            self.runPreflightThenStart(showLaunchConfirmationAfterStart: true)
-        }
+        runPreflightThenStart(showLaunchConfirmationAfterStart: true)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -860,7 +858,7 @@ private final class JasoGuardAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func registerDefaultPreferences() {
-        UserDefaults.standard.register(defaults: [showLaunchConfirmationKey: true, languagePreferenceKey: AppLanguage.system.rawValue])
+        UserDefaults.standard.register(defaults: [showLaunchConfirmationKey: true, preflightConsentAcceptedKey: false, languagePreferenceKey: AppLanguage.system.rawValue])
     }
 
     private func ensureRuntimeFiles() {
@@ -1086,6 +1084,10 @@ private final class JasoGuardAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPreflightConsentAlert(reason: PreflightReason) -> Bool {
+        if UserDefaults.standard.bool(forKey: preflightConsentAcceptedKey) {
+            return true
+        }
+
         createStatusItemIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
         let config: Config
@@ -1105,7 +1107,10 @@ private final class JasoGuardAppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: reason == .manualScan ? L.tr("preflight.cancel.button") : L.tr("preflight.quit.button"))
 
         let response = alert.runModal()
-        if response == .alertFirstButtonReturn { return true }
+        if response == .alertFirstButtonReturn {
+            UserDefaults.standard.set(true, forKey: preflightConsentAcceptedKey)
+            return true
+        }
         if response == .alertSecondButtonReturn {
             openPrivacySettings()
             return false
@@ -1275,15 +1280,15 @@ private final class JasoGuardAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private var appDelegateHolder: JasoGuardAppDelegate?
-
+@MainActor
 private func runMenuBarApp() {
     let app = NSApplication.shared
     let delegate = JasoGuardAppDelegate()
-    appDelegateHolder = delegate
     app.delegate = delegate
     app.setActivationPolicy(.accessory)
-    app.run()
+    withExtendedLifetime(delegate) {
+        app.run()
+    }
 }
 #endif
 
@@ -1341,6 +1346,7 @@ private func status() throws {
 
 @main
 private struct Main {
+    @MainActor
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         guard let command = args.first else {
