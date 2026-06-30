@@ -1,0 +1,25 @@
+{
+  "directoryEventDepth": 2,
+  "ignore": [
+    "~/Library",
+    "~/.Trash"
+  ],
+  "latencySeconds": 0.25,
+  "scanExistingOnStart": true,
+  "skipHiddenFiles": false,
+  "startupScanDepth": 8,
+  "watch": [
+    {
+      "path": "~/Desktop",
+      "recursive": true
+    },
+    {
+      "path": "~/Documents",
+      "recursive": true
+    },
+    {
+      "path": "~/Downloads",
+      "recursive": true
+    }
+  ]
+}
